@@ -1,19 +1,26 @@
 /*
  * Dakota's Basement
  * Main Application
- * Commit 5
  */
 
 window.DakotasBasement = {
     version: "2.0.0-dev",
     backend: "library",
-    initialized: false
+    initialized: false,
+
+    async init() {
+        console.log("Dakota's Basement starting...");
+
+        if (window.BasementTabs) {
+            BasementTabs.init();
+        }
+
+        this.initialized = true;
+
+        console.log("Dakota's Basement initialized.");
+    }
 };
 
-document.addEventListener("DOMContentLoaded", async () => {
-    console.log("Dakota's Basement starting...");
-    DakotasBasement.initialized = true;
-
-    // Browser initialization will be moved here
-    // as we refactor index.html.
+document.addEventListener("DOMContentLoaded", () => {
+    DakotasBasement.init();
 });
