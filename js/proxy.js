@@ -65,6 +65,18 @@ window.ProxyBackend = {
         }
     },
 
+    async fetch(url, options = {}) {
+        if (!this.ready) {
+            await this.init();
+        }
+
+        return this.curl.fetch(url, options);
+    },
+
+    async navigate(url, options = {}) {
+        return this.fetch(url, options);
+    },
+
     getSession() {
         return this.curl;
     }
