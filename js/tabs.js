@@ -8,7 +8,3 @@ window.BasementTabs = {
         console.log("Tabs module loaded.");
     }
 };
-
-document.addEventListener("DOMContentLoaded", () => {
-    BasementTabs.init();
-});
