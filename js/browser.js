@@ -4,26 +4,29 @@
  */
 
 window.BrowserCore = {
-    currentTab: null,
     tabs: [],
+    activeTabId: 1,
+    nextTabId: 2,
+
+    getActiveTab() {
+        return this.tabs.find(tab => tab.id === this.activeTabId);
+    },
+
+    setTabs(tabs) {
+        this.tabs = tabs;
+    },
+
+    setActiveTab(id) {
+        this.activeTabId = id;
+    },
+
+    allocateTabId() {
+        return this.nextTabId++;
+    },
 
     init() {
-        console.log("Browser core initialized.");
-    },
-
-    setCurrentTab(tab) {
-        this.currentTab = tab;
-    },
-
-    getCurrentTab() {
-        return this.currentTab;
-    },
-
-    addTab(tab) {
-        this.tabs.push(tab);
-    },
-
-    removeTab(id) {
-        this.tabs = this.tabs.filter(tab => tab.id !== id);
+        console.log("Browser core ready.");
     }
 };
+
+BrowserCore.init();
