@@ -8423,10 +8423,12 @@
                                 const _delay = _attempt === 0 ? 300 : _attempt === 1 ? 800 : 2000;
                                 await new Promise(r => setTimeout(r, _delay));
                                 if (opts.signal?.aborted) throw new DOMException('Aborted', 'AbortError');
-                                await libcurl.load_wasm();
-                                libcurl.set_websocket(WISP);
-                                curl = new libcurl.HTTPSession();
-                                curl.set_connections(MAX_CONCURRENT_ACTIVE, MAX_CONCURRENT_ACTIVE, MAX_CONCURRENT_ACTIVE);
+                                try {
+    curl = await ProxyBackend.init();
+} catch (err) {
+    console.error(err);
+    throw err;
+		};
                                 reconnected = true;
                                 log('Reconnected to WISP (attempt ' + (_attempt + 1) + ')', 'ok');
                                 break;
