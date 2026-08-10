@@ -1,0 +1,202 @@
+            window.addEventListener("message", async ev => {
+                const d = ev.data;
+                if (!d?.t) return;
+                // Only accept messages from our own iframe or self — reject anything else.
+                // This prevents third-party iframes embedded inside proxied pages from
+                // sending navigation or fetch commands directly to the parent.
+                if (ev.source !== frame.contentWindow && ev.source !== window) return;
+
+                if (d.t === 'hint') {
+                    if (d.u && typeof d.u === 'string') _pendingNavHint = d.u;
+                    return;
+                }
+                if (d.t === 'ctx') {
+                    const rect = frame.getBoundingClientRect();
+                    const x = rect.left + d.x;
+                    const y = rect.top + d.y;
+                    openContextMenu(x, y);
+                    return;
+                }
+
+                if (d.t === "q") {
+                    const {
+                        i,
+                        url,
+                        opts
+                    } = d;
+                    const priority = (opts?.method === 'POST') ? PRIORITY.html : getPriority(url, opts?.headers?.['Accept'] || opts?.headers?.['accept']);
+                    const msgTabId = activeTabId;
+                    if (closedTabIds.has(msgTabId)) return;
+                    const msgSignal = tabAbortControllers.get(msgTabId)?.signal || abortCtrl?.signal;
+                    try {
+                        const r = await queueFetch(url, {
+                            method: opts?.method,
+                            headers: opts?.headers,
+                            body: opts?.body,
+                            signal: msgSignal
+                        }, priority);
+                        if (r.skipped) {
+                            frame.contentWindow?.postMessage({
+                                t: 'r',
+                                i,
+                                s: 200,
+                                h: {},
+                                m: 'text/plain',
+                                d: ''
+                            }, '*');
+                            return;
+                        }
+                        const b64 = toB64(r.buf);
+                        if (r.fromCache) log(`<i class="fas fa-bolt" style="color: #22d3ee;"></i> ${url.slice(0, 45)} (${(r.buf.byteLength / 1024).toFixed(0)}K cache)`, "cache");
+                        else log(`<i class="fas fa-check" style="color:var(--ok)"></i>${url.slice(0, 45)} (${(r.buf.byteLength / 1024).toFixed(0)}K)`, "ok");
+                        // Clone buf for transfer — buf may be referenced by cache so we send a copy
+                        const transferBuf = r.buf.slice(0);
+                        frame.contentWindow?.postMessage({
+                            t: 'r',
+                            i,
+                            s: r.status,
+                            h: r.headers,
+                            m: r.mime,
+                            d: b64
+                        }, '*');
+                    } catch (e) {
+                        if (e.name === 'AbortError') return;
+                        log(`<i class="fas fa-xmark" style="color:var(--err)"></i>${url.slice(0, 45)} - ${e.message}`, "err");
+                        frame.contentWindow?.postMessage({
+                            t: 'r',
+                            i,
+                            e: e.message
+                        }, '*');
+                    }
+                    return;
+                }
+                if (d.t === "sse") {
+                    handleSSE(d.i, d.url, d.headers, tabAbortControllers.get(activeTabId)?.signal || abortCtrl?.signal);
+                    return;
+                }
+                if (d.t === "stream") {
+                    handleStreamFetch(d.i, d.url, d.opts, tabAbortControllers.get(activeTabId)?.signal || abortCtrl?.signal);
+                    return;
+                }
+                if (d.t === "ws") {
+                    if (d.a === "open") handleWsOpen(d.i, d.url, d.protocols);
+                    else if (d.a === "send") handleWsSend(d.i, d.d, d.b64);
+                    else if (d.a === "close") handleWsClose(d.i, d.code, d.reason);
+                    return;
+                }
+                if (d.t === "cookieSet") {
+                    const origin = d.origin || (pageUrl ? new URL(pageUrl).origin : "");
+                    if (origin && d.cookie) {
+                        updateCookie(origin, d.cookie);
+                        syncCookiesToFrame(origin);
+                    }
+                    return;
+                }
+                if (d.t === "n") {
+                    _pendingNavHint = null;
+                    // Guard: don't full-reload for same-origin/same-path navigations
+                    // (YouTube SPA calls location.assign/replace with its own URL or adds
+                    // query params via pushState — these must not trigger a new go()).
+                    // Skip this guard for form submissions (d.form=1) since changing the
+                    // query string IS the user's intent (e.g. editing a search query).
+                    if (!d.m && !d.b && !d.form && !d.nav && d.u) {
+                        try {
+                            const _du = new URL(normUrl(d.u)); const _pu = new URL(pageUrl || '');
+                            // Compare origin + pathname + search — SPAs that change ?q= ARE
+                            // real navigations (Brave Search, GitHub search, etc.).
+                            if (_du.origin === _pu.origin && _du.pathname === _pu.pathname && _du.search === _pu.search) {
+                                log('[nav] same-page nav ignored: ' + d.u.slice(0, 60), 'info');
+                                return;
+                            }
+                        } catch {}
+                    }
+                    // Immediately refresh the URL bar, pageUrl, and tab.url — always,
+                    // even if the URL appears unchanged, so any stale state from a
+                    // prior intercept (Navigation API + click double-post) gets
+                    // normalised before the async go() fetch completes.
+                    if (d.u) {
+                        const cleaned = normUrl(d.u);
+                        if (cleaned && !cleaned.startsWith('gust://')) {
+                            urlInput.value = cleaned;
+                            pageUrl = cleaned;
+                            const navTab = getActiveTab();
+                            if (navTab) navTab.url = cleaned;
+                            try { updateSecurityChip(cleaned); } catch {}
+                            try { updateBookmarkButton(); } catch {}
+                        }
+                    }
+                    go(d.u, true, d.m, d.b);
+                    return;
+                }
+                if (d.t === "rl") {
+                    // Throttle: ignore location.reload() calls within 15s of page load
+                    // to stop SPAs like YouTube from reloading mid-initialization.
+                    const _now = Date.now();
+                    if (!window._lastPageLoadTime || (_now - window._lastPageLoadTime) > 15000) {
+                        log('[nav] location.reload() → reloading', 'info');
+                        if (pageUrl) go(pageUrl, false);
+                    } else {
+                        log('[nav] location.reload() suppressed (too soon after page load)', 'warn');
+                    }
+                    return;
+                }
+                if (d.t === "uc") {
+                    // Validate: only accept real http(s) URLs pushed via history API.
+                    // Reject about:/blob:/data:/javascript: or unparseable values to
+                    // prevent the omnibar from getting clobbered by a spurious
+                    // pushState from a proxied page during hydration.
+                    if (!d.u || typeof d.u !== 'string') return;
+                    let parsed;
+                    try { parsed = new URL(d.u); } catch { return; }
+                    if (!/^https?:$/.test(parsed.protocol)) return;
+                    urlInput.value = d.u;
+                    pageUrl = d.u;
+                    const navTab = getActiveTab();
+                    if (navTab) navTab.url = d.u;
+                    if (!isErrorPage) updateSecurityChip(d.u);
+                    try {
+                        const host = parsed.hostname.replace(/^www\./, "");
+                        setTabTitle(host || "Loading...");
+                    } catch { }
+                    updateBookmarkButton();
+                    if (typeof updatePauseSiteBtn === 'function') updatePauseSiteBtn();
+                    return;
+                }
+                if (d.t === "ready") {
+                    window._lastPageLoadTime = Date.now();
+                    log("Page ready", "info");
+                    if (pageUrl) { try { syncCookiesToFrame(new URL(pageUrl).origin); } catch { } }
+                    return;
+                }
+                if (d.t === "fullscreen") {
+                    if (d.enter) document.documentElement.requestFullscreen?.();
+                    return;
+                }
+                if (d.t === "c") {
+                    const cls = {
+                        log: "",
+                        warn: "warn",
+                        error: "err",
+                        info: "info"
+                    }[d.m] || "";
+                    // Escape page-controlled console output before it hits innerHTML in log()
+                    const _safeConsole = String((d.a || []).join(" ")).slice(0, 300)
+                        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+                    log("[Page] " + _safeConsole, cls);
+                }
+                // ── Viewer download: triggered via postMessage from viewer pages ──
+                if (d.t === "gust:download") {
+                    try {
+                        const a = document.createElement('a');
+                        a.href = d.data;      // data: URI
+                        a.download = d.name || 'download';
+                        document.body.appendChild(a);
+                        a.click();
+                        document.body.removeChild(a);
+                        log('<i class="fas fa-download" style="color:var(--ok)"></i>Downloaded: ' + (d.name || 'file'), 'ok');
+                    } catch(e) {
+                        log('Download failed: ' + e.message, 'err');
+                    }
+                    return;
+                }
+            }); // end window.addEventListener("message", ...)
