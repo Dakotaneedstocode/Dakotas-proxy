@@ -1,0 +1,866 @@
+            function makeProxyScript(baseUrl, blockEnabled = true, webrtcBlock = false, pageUA = null, spellcheck = false) {
+                const proxySkipList = [...SKIP_DOMAINS, ...getCustomFilters().network];
+                return `(function(){
+if(window.__P) return;
+window.__P = true;
+
+const BASE = ${JSON.stringify(baseUrl)};
+const ORIGIN = new URL(BASE).origin;
+const SKIP = ${JSON.stringify(proxySkipList)};
+const BLOCK_ENABLED = ${JSON.stringify(!!blockEnabled)};
+const WEBRTC_BLOCK = ${JSON.stringify(!!webrtcBlock)};
+const SPOOF_UA = ${JSON.stringify(pageUA || 'Mozilla/5.0 (Macintosh; Intel Mac OS X 14_4) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15')};
+const SPELLCHECK = ${JSON.stringify(!!spellcheck)};
+
+function shouldSkip(url) {
+  if (!BLOCK_ENABLED) return false;
+  try { const h = new URL(url).hostname.toLowerCase(); return SKIP.some(d => h.includes(d)); } catch { return false; }
+}
+
+const assetsPath = BASE.substring(0, BASE.lastIndexOf('/') + 1);
+try { window.__webpack_public_path__ = assetsPath; } catch {}
+try { if (typeof __webpack_require__ !== 'undefined') __webpack_require__.p = assetsPath; } catch {}
+try { Object.defineProperty(window, '__webpack_public_path__', { get: () => window.__wpp || assetsPath, set: v => { window.__wpp = v; }, configurable: true }); } catch {}
+
+// ── Next.js / Vite / React framework fixes ─────────────────────────────────
+// 1. import.meta.url inside ES-module scripts resolves to the blob: URL of
+//    the iframe document, making dynamic import() and asset-path calculations
+//    (e.g. new URL('./chunk.js', import.meta.url)) point at blob:null/… and
+//    fail.  We expose the real page origin so framework resolvers work.
+try {
+  Object.defineProperty(window, '__GUST_REAL_BASE__', { value: BASE, configurable: true });
+} catch {}
+
+// 2. Next.js reads __NEXT_DATA__.assetPrefix to build /_next/static/… URLs.
+//    Inside a blob iframe the prefix must be the real origin, not empty string.
+try {
+  if (window.__NEXT_DATA__ && !window.__NEXT_DATA__.assetPrefix) {
+    window.__NEXT_DATA__.assetPrefix = ORIGIN;
+  }
+  // Also patch after DOMContentLoaded in case the inline script sets it late.
+  document.addEventListener('DOMContentLoaded', function _ndPatch() {
+    document.removeEventListener('DOMContentLoaded', _ndPatch);
+    try {
+      if (window.__NEXT_DATA__ && !window.__NEXT_DATA__.assetPrefix) {
+        window.__NEXT_DATA__.assetPrefix = ORIGIN;
+      }
+    } catch {}
+  });
+} catch {}
+
+// 3. Vite / Rollup embed chunk hashes in import.meta.url paths.  We can't
+//    truly override import.meta.url (it's not writable), but we can ensure
+//    any URL constructed from it is resolved against the real BASE.  Intercept
+//    the URL constructor so new URL(relative, blobHref) → new URL(relative, BASE).
+try {
+  const _OrigURL = window.URL;
+  function _GustURL(url, base) {
+    if (base && typeof base === 'string' && /^blob:/i.test(base)) {
+      base = BASE;
+    }
+    return new _OrigURL(url, base);
+  }
+  _GustURL.createObjectURL = _OrigURL.createObjectURL.bind(_OrigURL);
+  _GustURL.revokeObjectURL = _OrigURL.revokeObjectURL.bind(_OrigURL);
+  _GustURL.canParse       = _OrigURL.canParse ? _OrigURL.canParse.bind(_OrigURL) : undefined;
+  Object.setPrototypeOf(_GustURL, _OrigURL);
+  try { window.URL = _GustURL; } catch {}
+} catch {}
+// ───────────────────────────────────────────────────────────────────────────
+
+let currentScript = null;
+const scriptUrls = new WeakMap();
+
+function patchScriptNode(node, realSrc) {
+  if (!node || node.__isPatched || !realSrc) return node;
+  try { Object.defineProperty(node, '__isPatched', { value: true, enumerable: false }); } catch {}
+  try { Object.defineProperty(node, 'src', { get: () => realSrc, set: function(v) { this.setAttribute('src', v); }, configurable: true }); } catch {}
+  const origGet = node.getAttribute;
+  node.getAttribute = function(n) { return (n === 'src' || n === 'SRC') ? realSrc : origGet.call(this, n); };
+  return node;
+}
+const nativeCurrentScriptGet = Object.getOwnPropertyDescriptor(Document.prototype, 'currentScript')?.get;
+Object.defineProperty(document, 'currentScript', {
+  get() {
+    if (currentScript) {
+      const url = scriptUrls.get(currentScript);
+      if (url) return patchScriptNode(currentScript, url);
+    }
+    const native = nativeCurrentScriptGet ? nativeCurrentScriptGet.call(document) : null;
+    if (native) {
+      const dataUrl = native.getAttribute?.('data-original-src') || native.getAttribute?.('data-proxy-src');
+      const src = dataUrl || native.getAttribute?.('src') || native.src;
+      if (src) return patchScriptNode(native, src);
+      return native;
+    }
+    return currentScript;
+  },
+  configurable: true
+});
+
+const cookies = new Map();
+try { const s = sessionStorage.getItem('_c_' + ORIGIN); if (s) JSON.parse(s).forEach(([k,v]) => cookies.set(k,v)); } catch {}
+Object.defineProperty(document, 'cookie', {
+  get() { return [...cookies].map(([k,v]) => k+'='+v).join('; '); },
+  set(s) { const m = String(s).match(/^([^=]+)=([^;]*)/); if (m) { if (s.includes('max-age=0') || s.includes('expires=Thu, 01 Jan 1970')) cookies.delete(m[1].trim()); else cookies.set(m[1].trim(), m[2]); try { sessionStorage.setItem('_c_' + ORIGIN, JSON.stringify([...cookies])); } catch {} try { parent.postMessage({ t: 'cookieSet', origin: ORIGIN, cookie: s }, '*'); } catch {} } },
+  configurable: true
+});
+
+const pfx = '_s_' + ORIGIN + '_';
+const mkStore = s => ({ getItem: k => s.getItem(pfx+k), setItem: (k,v) => s.setItem(pfx+k,v), removeItem: k => s.removeItem(pfx+k), clear: () => Object.keys(s).filter(k=>k.startsWith(pfx)).forEach(k=>s.removeItem(k)), key: i => { const ks = Object.keys(s).filter(k=>k.startsWith(pfx)); return ks[i]?.slice(pfx.length)||null; }, get length() { return Object.keys(s).filter(k=>k.startsWith(pfx)).length; } });
+try { Object.defineProperty(window, 'localStorage', {value: mkStore(localStorage)}); } catch {}
+try { Object.defineProperty(window, 'sessionStorage', {value: mkStore(sessionStorage)}); } catch {}
+
+const origIDBOpen = indexedDB.open.bind(indexedDB);
+indexedDB.open = function(name, version) { return origIDBOpen(pfx + name, version); };
+
+let rid = 0;
+const pending = new Map();
+const sseHandlers = new Map();
+const streamHandlers = new Map();
+const wsClients = new Map();
+
+window.addEventListener('message', e => {
+  if (e.source !== parent) return;
+  const d = e.data;
+  if (!d) return;
+  if (d.t === 'cookieSync') {
+    if (d.origin !== ORIGIN || typeof d.cookie !== 'string') return;
+    d.cookie.split(/;\s*/).forEach(p => {
+      const m = p.match(/^([^=]+)=([^;]*)/);
+      if (m) cookies.set(m[1].trim(), m[2]);
+    });
+    try { sessionStorage.setItem('_c_' + ORIGIN, JSON.stringify([...cookies])); } catch {}
+  }
+  if (d.t === 'r') { const p = pending.get(d.i); if (p) { pending.delete(d.i); clearTimeout(p.tm); d.e ? p.rj(new Error(d.e)) : p.rs(d); } }
+  if (d.t === 'sse') { const h = sseHandlers.get(d.i); if (h) { if (d.error) { h.onerror?.(new Event('error')); sseHandlers.delete(d.i); } else if (d.done) { sseHandlers.delete(d.i); } else if (d.chunk) { h.onchunk?.(d.chunk); } } }
+  if (d.t === 'streamStart') { const h = streamHandlers.get(d.i); if (h) h.onstart?.(d.status, d.headers); }
+  if (d.t === 'streamData') { const h = streamHandlers.get(d.i); if (h && d.d) { const bin = atob(d.d); const arr = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i); h.ondata?.(arr); } }
+  if (d.t === 'streamEnd') { const h = streamHandlers.get(d.i); if (h) { h.onend?.(); streamHandlers.delete(d.i); } }
+  if (d.t === 'streamError') { const h = streamHandlers.get(d.i); if (h) { h.onerror?.(new Error(d.error)); streamHandlers.delete(d.i); } }
+  if (d.t === 'ws') {
+    const ws = wsClients.get(d.i);
+    if (!ws) return;
+    if (d.a === 'open') { ws.readyState = 1; ws.protocol = d.protocol || ''; const evt = new Event('open'); ws.dispatchEvent(evt); ws.onopen?.(evt); }
+    if (d.a === 'message') {
+      let data = d.d;
+      if (d.b64) { const bin = atob(d.d || ''); const arr = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i); data = ws.binaryType === 'arraybuffer' ? arr.buffer : new Blob([arr]); }
+      const evt = new MessageEvent('message', { data });
+      ws.dispatchEvent(evt);
+      ws.onmessage?.(evt);
+    }
+    if (d.a === 'error') { const evt = new Event('error'); ws.dispatchEvent(evt); ws.onerror?.(evt); }
+    if (d.a === 'close') { ws.readyState = 3; const evt = new CloseEvent('close', { code: d.code || 1000, reason: d.reason || '', wasClean: d.wasClean }); ws.dispatchEvent(evt); ws.onclose?.(evt); wsClients.delete(d.i); }
+  }
+  if (d.type === 'gust:highlight' && d.selector) {
+    try {
+      document.querySelectorAll('.gust-highlight').forEach(el => el.classList.remove('gust-highlight'));
+      const el = document.querySelector(d.selector);
+      if (el) { el.classList.add('gust-highlight'); el.scrollIntoView({ behavior: 'smooth', block: 'center' }); }
+    } catch (e) {}
+  }
+  if (d.type === 'gust:clearHighlight') {
+    try { document.querySelectorAll('.gust-highlight').forEach(el => el.classList.remove('gust-highlight')); } catch(e) {}
+  }
+  if (d.type === 'gust:getStyles' && d.selector) {
+    try {
+      const el = document.querySelector(d.selector);
+      if (el) {
+        const cs = getComputedStyle(el);
+        const styles = {};
+        ['display','position','width','height','margin','margin-top','margin-right','margin-bottom','margin-left','padding','padding-top','padding-right','padding-bottom','padding-left','color','background','background-color','font-size','font-weight','font-family','border','border-radius','flex','grid','z-index','overflow','opacity','transform','box-shadow','line-height','text-align'].forEach(p => { styles[p] = cs.getPropertyValue(p); });
+        parent.postMessage({ type: 'gust:stylesResult', styles }, '*');
+      }
+    } catch(e) {}
+  }
+  if (d.type === 'gust:getBox' && d.selector) {
+    try {
+      const el = document.querySelector(d.selector);
+      if (el) {
+        const r = el.getBoundingClientRect();
+        const cs = getComputedStyle(el);
+        parent.postMessage({ type: 'gust:boxResult', box: {
+          width: r.width, height: r.height, top: r.top, left: r.left,
+          marginTop: cs.marginTop, marginRight: cs.marginRight, marginBottom: cs.marginBottom, marginLeft: cs.marginLeft,
+          paddingTop: cs.paddingTop, paddingRight: cs.paddingRight, paddingBottom: cs.paddingBottom, paddingLeft: cs.paddingLeft
+        }}, '*');
+      }
+    } catch(e) {}
+  }
+  if (d.type === 'gust:scrollTo' && d.selector) {
+    try { document.querySelector(d.selector)?.scrollIntoView({ behavior: 'smooth', block: 'center' }); } catch(e) {}
+  }
+  if (d.type === 'gust:spellcheck') {
+    try { document.querySelectorAll('input, textarea').forEach(el => el.spellcheck = !!d.enabled); } catch(e) {}
+  }
+});
+
+function req(url, opts = {}) {
+  if (shouldSkip(url)) return Promise.resolve({ d: '', s: 200, h: {}, m: 'text/plain' });
+  return new Promise((rs, rj) => {
+    const i = ++rid;
+    // 45s timeout — 120s was too long on filtered networks (Lightspeed etc.), causing
+    // the pending map to accumulate zombie entries that never resolve or reject.
+    const tm = setTimeout(() => { pending.delete(i); rj(new Error('Timeout')); }, 45000);
+    pending.set(i, { rs, rj, tm });
+    parent.postMessage({ t: 'q', i, url, opts }, '*');
+  });
+}
+
+function resolve(url, base) {
+  if (!url) return '';
+  if (/^(data:|blob:|javascript:|about:|#)/i.test(url)) return url;
+  let b = base || BASE;
+  if (b && (String(b).startsWith('blob:') || String(b).startsWith('null'))) b = BASE;
+  try { return new URL(url, b).href; } catch { return url; }
+}
+
+const blobs = new Map();
+const blobPromises = new Map();
+
+function b64FromArray(arr) {
+  let bin = "";
+  const chunk = 32768;
+  for (let i = 0; i < arr.length; i += chunk) {
+    bin += String.fromCharCode.apply(null, arr.subarray(i, i + chunk));
+  }
+  return btoa(bin);
+}
+
+async function fetchBlob(url, type) {
+  if (shouldSkip(url)) return 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7';
+  if (blobs.has(url)) return blobs.get(url);
+  if (blobPromises.has(url)) return blobPromises.get(url);
+  const promise = (async () => {
+    const r = await req(url);
+    if (!r.d) return '';
+    const bin = atob(r.d);
+    const arr = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
+    const blob = new Blob([arr], { type: r.m || type || 'application/octet-stream' });
+    const burl = URL.createObjectURL(blob);
+    blobs.set(url, burl);
+    if (blobs.size > 500) { const f = blobs.keys().next().value; URL.revokeObjectURL(blobs.get(f)); blobs.delete(f); }
+    return burl;
+  })();
+  blobPromises.set(url, promise);
+  promise.finally(() => blobPromises.delete(url));
+  return promise;
+}
+
+const _fetch = window.fetch;
+window.fetch = async function(input, init = {}) {
+  let url = typeof input === 'string' ? input : (input instanceof URL ? input.href : (input?.url || String(input)));
+  if (/^blob:/i.test(url)) return _fetch.call(window, input, init);
+  url = resolve(url);
+  if (shouldSkip(url)) return new Response('', { status: 200 });
+  // Handle Request objects: extract method/headers/body from the Request,
+  // then let init override (per fetch spec). This fixes sites like YouTube
+  // that call fetch(new Request(url, {method:'POST', headers:{...}, body:...})).
+  const isRequest = typeof Request !== 'undefined' && input instanceof Request;
+  const method = init.method || (isRequest ? input.method : null) || 'GET';
+  let body = init.body !== undefined ? init.body : (isRequest && !input.bodyUsed ? input.body : undefined);
+  const headers = {};
+  if (isRequest) { try { input.headers.forEach((v, k) => { headers[k] = v; }); } catch(e) {} }
+  if (init.headers) { if (init.headers instanceof Headers) init.headers.forEach((v,k) => headers[k] = v); else if (typeof init.headers === 'object') Object.assign(headers, init.headers); }
+  if (body instanceof FormData) body = new URLSearchParams(body).toString();
+  else if (body instanceof URLSearchParams) body = body.toString();
+  else if (body instanceof ReadableStream) { const reader = body.getReader(); const chunks = []; while (true) { const { done, value } = await reader.read(); if (done) break; chunks.push(value); } const totalLength = chunks.reduce((acc, chunk) => acc + chunk.length, 0); const result = new Uint8Array(totalLength); let offset = 0; for (const chunk of chunks) { result.set(chunk, offset); offset += chunk.length; } let _bin = ''; const _chunk = 32768; for (let _i = 0; _i < result.length; _i += _chunk) _bin += String.fromCharCode.apply(null, result.subarray(_i, _i + _chunk)); body = btoa(_bin); headers['__body_b64__'] = '1'; }
+  const wantsStream = headers['accept']?.includes('text/event-stream') || headers['Accept']?.includes('text/event-stream');
+  if (wantsStream) {
+    return new Promise((resolve, reject) => {
+      const i = ++rid; let responseHeaders = {}; let status = 200; let controller;
+      const stream = new ReadableStream({ start(c) { controller = c; }, cancel() { streamHandlers.delete(i); } });
+      streamHandlers.set(i, { onstart: (s, h) => { status = s; responseHeaders = h; }, ondata: (arr) => { controller?.enqueue(arr); }, onend: () => { controller?.close(); }, onerror: (e) => { controller?.error(e); reject(e); } });
+      parent.postMessage({ t: 'stream', i, url, opts: { method, headers, body } }, '*');
+      setTimeout(() => { resolve(new Response(stream, { status, headers: new Headers(responseHeaders) })); }, 50);
+    });
+  }
+  const r = await req(url, { method, headers, body });
+  const bin = atob(r.d || '');
+  const arr = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
+  return new Response(arr, { status: r.s || 200, headers: new Headers(r.h || {}) });
+};
+
+const OrigEventSource = window.EventSource;
+window.EventSource = class extends EventTarget {
+  constructor(url, opts = {}) {
+    super(); this.url = resolve(url); this.readyState = 0; this.withCredentials = opts.withCredentials || false;
+    const i = ++rid; this._id = i; let buffer = ''; let lastEventId = ''; let eventType = 'message'; let data = '';
+    const processLine = (line) => { if (line === '') { if (data) { const evt = new MessageEvent(eventType, { data: data.slice(0, -1), lastEventId }); this.dispatchEvent(evt); if (eventType === 'message' && this.onmessage) this.onmessage(evt); } data = ''; eventType = 'message'; } else if (line.startsWith('data:')) { data += line.slice(5).trim() + '\\n'; } else if (line.startsWith('event:')) { eventType = line.slice(6).trim(); } else if (line.startsWith('id:')) { lastEventId = line.slice(3).trim(); } };
+    sseHandlers.set(i, { onchunk: (chunk) => { buffer += chunk; const lines = buffer.split('\\n'); buffer = lines.pop() || ''; lines.forEach(processLine); }, onerror: (e) => { this.readyState = 2; this.dispatchEvent(new Event('error')); if (this.onerror) this.onerror(e); } });
+    parent.postMessage({ t: 'sse', i, url: this.url, headers: {} }, '*');
+    setTimeout(() => { this.readyState = 1; this.dispatchEvent(new Event('open')); if (this.onopen) this.onopen(new Event('open')); }, 100);
+  }
+  close() { this.readyState = 2; sseHandlers.delete(this._id); }
+};
+
+const OrigURL = URL;
+function SafeURL(u, b) {
+  try { return b !== undefined ? new OrigURL(u, b) : new OrigURL(u); }
+  catch (e) {
+    try { return new OrigURL(u, BASE); }
+    catch { throw e; }
+  }
+}
+SafeURL.createObjectURL = OrigURL.createObjectURL.bind(OrigURL);
+SafeURL.revokeObjectURL = OrigURL.revokeObjectURL.bind(OrigURL);
+SafeURL.prototype = OrigURL.prototype;
+SafeURL.toString = OrigURL.toString.bind(OrigURL);
+window.URL = SafeURL;
+window.webkitURL = SafeURL;
+
+const OrigWebSocket = window.WebSocket;
+window.WebSocket = class extends EventTarget {
+  constructor(url, protocols) {
+    super();
+    this.url = resolve(url);
+    this.readyState = 0;
+    this.bufferedAmount = 0;
+    this.extensions = "";
+    this.protocol = "";
+    this.binaryType = "blob";
+    this._id = ++rid;
+    wsClients.set(this._id, this);
+    parent.postMessage({ t: 'ws', a: 'open', i: this._id, url: this.url, protocols }, '*');
+  }
+  send(data) {
+    if (this.readyState !== 1) return;
+    if (data instanceof ArrayBuffer) {
+      parent.postMessage({ t: 'ws', a: 'send', i: this._id, b64: 1, d: b64FromArray(new Uint8Array(data)) }, '*');
+    } else if (ArrayBuffer.isView(data)) {
+      const arr = new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
+      parent.postMessage({ t: 'ws', a: 'send', i: this._id, b64: 1, d: b64FromArray(arr) }, '*');
+    } else if (data instanceof Blob) {
+      data.arrayBuffer().then(buf => parent.postMessage({ t: 'ws', a: 'send', i: this._id, b64: 1, d: b64FromArray(new Uint8Array(buf)) }, '*')).catch(() => {});
+    } else {
+      parent.postMessage({ t: 'ws', a: 'send', i: this._id, d: String(data) }, '*');
+    }
+  }
+  close(code, reason) {
+    if (this.readyState > 1) return;
+    this.readyState = 2;
+    parent.postMessage({ t: 'ws', a: 'close', i: this._id, code, reason }, '*');
+  }
+};
+Object.assign(window.WebSocket, { CONNECTING: 0, OPEN: 1, CLOSING: 2, CLOSED: 3 });
+
+const _XHR = window.XMLHttpRequest;
+window.XMLHttpRequest = function() {
+  let method = 'GET', url = '', async = true, reqH = {}, respType = '';
+  let state = 0, status = 0, statusText = '', response = null, responseText = '', respH = {};
+  const listeners = {}; const xhr = this; let uploadListeners = {};
+  const fire = (t, e) => { e = e || { type: t }; if (xhr['on' + t]) try { xhr['on' + t](e); } catch {} (listeners[t] || []).forEach(fn => { try { fn.call(xhr, e); } catch {} }); };
+  const setReady = s => { state = s; fire('readystatechange'); };
+  xhr.upload = { addEventListener: (t, fn) => { if (!uploadListeners[t]) uploadListeners[t] = []; uploadListeners[t].push(fn); }, removeEventListener: (t, fn) => { if (uploadListeners[t]) uploadListeners[t] = uploadListeners[t].filter(f => f !== fn); } };
+  xhr.open = function(m, u, a) { method = m; url = resolve(u); async = a !== false; reqH = {}; setReady(1); };
+  xhr.setRequestHeader = (k, v) => { reqH[k] = v; };
+  xhr.getResponseHeader = k => respH[k.toLowerCase()] || null;
+  xhr.getAllResponseHeaders = () => Object.entries(respH).map(([k,v]) => k + ': ' + v).join('\\r\\n');
+  xhr.overrideMimeType = () => {}; xhr.abort = () => fire('abort');
+  xhr.send = async function(body) {
+    if (/^blob:/i.test(url)) { const native = new _XHR(); native.open(method, url, async); native.responseType = respType; Object.entries(reqH).forEach(([k,v]) => native.setRequestHeader(k, v)); native.onreadystatechange = () => { state = native.readyState; status = native.status; response = native.response; try { responseText = native.responseText; } catch {} fire('readystatechange'); }; native.onload = () => fire('load'); native.onerror = () => fire('error'); native.send(body); return; }
+    if (shouldSkip(url)) { status = 200; response = responseText = ''; setReady(4); fire('load'); fire('loadend'); return; }
+    if (body) { const total = body.length || body.size || 1000; (uploadListeners['loadstart'] || []).forEach(fn => fn({ lengthComputable: true, loaded: 0, total })); (uploadListeners['progress'] || []).forEach(fn => fn({ lengthComputable: true, loaded: total, total })); (uploadListeners['load'] || []).forEach(fn => fn({ lengthComputable: true, loaded: total, total })); }
+    if (body instanceof FormData) body = new URLSearchParams(body).toString();
+    setReady(1);
+    try {
+      const r = await req(url, { method, headers: reqH, body }); status = r.s || 200; respH = r.h || {};
+      setReady(2); setReady(3);
+      const bin = atob(r.d || ''); const arr = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
+      fire('progress', { lengthComputable: true, loaded: arr.length, total: arr.length });
+      if (respType === 'arraybuffer') response = arr.buffer;
+      else if (respType === 'blob') response = new Blob([arr]);
+      else if (respType === 'json') { responseText = new TextDecoder().decode(arr); try { response = JSON.parse(responseText); } catch { response = null; } }
+      else if (respType === 'document') { responseText = new TextDecoder().decode(arr); try { response = new DOMParser().parseFromString(responseText, 'text/html'); } catch { response = null; } }
+      else { responseText = new TextDecoder().decode(arr); response = responseText; }
+      setReady(4); fire('load'); fire('loadend');
+    } catch (e) { status = 0; setReady(4); fire('error'); fire('loadend'); }
+  };
+  xhr.addEventListener = (t, fn) => { if (!listeners[t]) listeners[t] = []; listeners[t].push(fn); };
+  xhr.removeEventListener = (t, fn) => { if (listeners[t]) listeners[t] = listeners[t].filter(f => f !== fn); };
+  Object.defineProperties(xhr, { readyState: { get: () => state }, status: { get: () => status }, statusText: { get: () => statusText }, response: { get: () => response }, responseText: { get: () => responseText }, responseType: { get: () => respType, set: v => respType = v }, responseURL: { get: () => url }, timeout: { get: () => 0, set: () => {} }, withCredentials: { get: () => false, set: () => {} } });
+  xhr.UNSENT = 0; xhr.OPENED = 1; xhr.HEADERS_RECEIVED = 2; xhr.LOADING = 3; xhr.DONE = 4;
+};
+Object.assign(XMLHttpRequest, { UNSENT: 0, OPENED: 1, HEADERS_RECEIVED: 2, LOADING: 3, DONE: 4 });
+
+const elMap = [ { p: HTMLImageElement.prototype, a: ['src'] }, { p: HTMLVideoElement.prototype, a: ['src', 'poster'] }, { p: HTMLAudioElement.prototype, a: ['src'] }, { p: HTMLSourceElement.prototype, a: ['src'] }, { p: HTMLTrackElement.prototype, a: ['src'] }, { p: HTMLEmbedElement.prototype, a: ['src'] }, { p: HTMLObjectElement.prototype, a: ['data'] }, { p: HTMLInputElement.prototype, a: ['src'] } ];
+const loadingEls = new WeakMap();
+const pendingLoads = new Set();
+const loadedUrls = new Set();
+const MAX_CONCURRENT_MEDIA = 24;
+
+elMap.forEach(({ p, a }) => { a.forEach(attr => { const desc = Object.getOwnPropertyDescriptor(p, attr); if (!desc) return; Object.defineProperty(p, attr, { get() { return this.getAttribute('data-real-' + attr) || this.getAttribute(attr) || ''; }, set(val) { 
+if (!val || /^(data:|blob:|javascript:|about:)/i.test(val)) { if (desc.set) desc.set.call(this, val); return; } 
+const absUrl = resolve(val); 
+if (shouldSkip(absUrl)) return; 
+const el = this; 
+const currentReal = el.getAttribute('data-real-' + attr);
+if (currentReal === absUrl) return;
+if (loadedUrls.has(absUrl) && pendingLoads.has(absUrl)) return;
+el.setAttribute('data-real-' + attr, absUrl); 
+if (loadingEls.has(el)) loadingEls.get(el).cancel = true; 
+const state = { cancel: false }; 
+loadingEls.set(el, state); 
+
+loadMedia();
+async function loadMedia() {
+  if (pendingLoads.has(absUrl)) return;
+  while (pendingLoads.size >= MAX_CONCURRENT_MEDIA) await new Promise(r => setTimeout(r, 50));
+  if (state.cancel) return;
+  pendingLoads.add(absUrl);
+  try {
+    const burl = await fetchBlob(absUrl);
+    if (state.cancel) return;
+    loadedUrls.add(absUrl);
+    el.setAttribute('data-blob-' + attr, burl);
+    if (desc.set) desc.set.call(el, burl);
+    else el.setAttribute(attr, burl);
+    el.dispatchEvent(new Event('load'));
+  } catch (e) {
+    if (!state.cancel) el.dispatchEvent(new Event('error'));
+  } finally {
+    pendingLoads.delete(absUrl);
+  }
+}
+}, configurable: true }); }); });
+
+[HTMLImageElement.prototype, HTMLSourceElement.prototype].forEach(p => { const desc = Object.getOwnPropertyDescriptor(p, 'srcset'); if (!desc) return; Object.defineProperty(p, 'srcset', { get() { return this.getAttribute('srcset') || ''; }, async set(val) { if (!val) { this.setAttribute('srcset', ''); return; } if (this.getAttribute('data-srcset-loading') === val) return; this.setAttribute('data-srcset-loading', val); const parts = val.split(',').map(s => s.trim()); 
+const rewritten = await Promise.all(parts.map(async part => {
+  const m = part.match(/^(\\S+)(.*)?$/);
+  if (!m) return part;
+  const [, url, rest] = m;
+  if (/^(data:|blob:)/i.test(url)) return part;
+  try {
+    const burl = await fetchBlob(resolve(url), 'image/*');
+    return burl + (rest || '');
+  } catch { return ''; }
+}));
+this.setAttribute('srcset', rewritten.filter(Boolean).join(', '));
+this.removeAttribute('data-srcset-loading'); }, configurable: true }); });
+
+async function rewriteCss(css, base, _depth) {
+  if ((_depth || 0) > 4) return css;
+  const importRe = /@import\\s+(?:url\\()?['"]?([^'")\\s;]+)['"]?\\)?[^;]*;/gi;
+  const importMatches = [...css.matchAll(importRe)];
+  for (const im of importMatches) {
+    try {
+      const importUrl = resolve(im[1], base);
+      const r = await req(importUrl);
+      if (r.d) {
+        const bin = atob(r.d); const arr = new Uint8Array(bin.length);
+        for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
+        let importCss = new TextDecoder().decode(arr);
+        importCss = await rewriteCss(importCss, importUrl, (_depth || 0) + 1);
+        css = css.replace(im[0], importCss);
+      }
+    } catch { }
+  }
+  const regex = /url\\(\\s*(['"]?)([^'"\\)]+)\\1\\s*\\)/gi;
+  const result_seen = new Set();
+  let result = css;
+  for (const m of [...css.matchAll(regex)]) {
+    if (/^(data:|blob:|#)/i.test(m[2]) || result_seen.has(m[0])) continue;
+    result_seen.add(m[0]);
+    const absUrl = resolve(m[2], base);
+    const ext = absUrl.split('?')[0].split('.').pop().toLowerCase();
+    const isFont = /woff2?|ttf|otf|eot/.test(ext);
+    try {
+      if (isFont) {
+       
+        const r = await req(absUrl);
+        if (r.d) {
+          const fontMime = ext === 'woff2' ? 'font/woff2' : ext === 'woff' ? 'font/woff' : ext === 'ttf' ? 'font/ttf' : ext === 'otf' ? 'font/otf' : 'font/woff2';
+          result = result.split(m[0]).join('url("data:' + fontMime + ';base64,' + r.d + '")');
+        } else {
+          result = result.split(m[0]).join('url("' + absUrl + '")');
+        }
+      } else {
+        const _blobUrl = await fetchBlob(absUrl);
+        result = result.split(m[0]).join('url("' + _blobUrl + '")');
+      }
+    } catch { try { result = result.split(m[0]).join('url("' + absUrl + '")'); } catch {} }
+  }
+  return result;
+}
+const cssPropList = ['background', 'backgroundImage', 'listStyleImage', 'borderImage', 'maskImage', 'content', 'cursor'];
+const styleProto = CSSStyleDeclaration.prototype;
+cssPropList.forEach(prop => { const desc = Object.getOwnPropertyDescriptor(styleProto, prop); if (!desc?.set) return; Object.defineProperty(styleProto, prop, { get: desc.get, set(val) { if (val && typeof val === 'string' && val.includes('url(')) rewriteCss(val, BASE).then(r => desc.set.call(this, r)).catch(() => desc.set.call(this, val)); else desc.set.call(this, val); }, configurable: true }); });
+const cssTextDesc = Object.getOwnPropertyDescriptor(styleProto, 'cssText');
+if (cssTextDesc?.set) { Object.defineProperty(styleProto, 'cssText', { get: cssTextDesc.get, set(val) { if (val && val.includes('url(')) rewriteCss(val, BASE).then(r => cssTextDesc.set.call(this, r)).catch(() => cssTextDesc.set.call(this, val)); else cssTextDesc.set.call(this, val); }, configurable: true }); }
+
+const origAppend = Node.prototype.appendChild;
+const origInsert = Node.prototype.insertBefore;
+
+const origSetAttr = Element.prototype.setAttribute;
+Element.prototype.setAttribute = function(name, value) { const tag = this.tagName; if (tag === 'LINK' && name === 'href' && (this.rel || '').includes('stylesheet')) { if (value && !/^(data:|blob:)/i.test(value)) { const url = resolve(value); if (shouldSkip(url)) return; const link = this; req(url).then(async r => { const bin = atob(r.d || ''); const arr = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i); let css = new TextDecoder().decode(arr); css = await rewriteCss(css, url); const style = document.createElement('style'); style.textContent = css; if (link.parentNode) link.parentNode.replaceChild(style, link); }).catch(() => origSetAttr.call(this, name, value)); return; } } if ((tag === 'IMG' || tag === 'VIDEO' || tag === 'AUDIO' || tag === 'SOURCE') && (name === 'src' || name === 'poster')) { if (value && !/^(data:|blob:)/i.test(value)) { this[name] = value; return; } } return origSetAttr.call(this, name, value); };
+
+const processedEls = new WeakMap(); // url -> true, so we re-process if src changed
+function processEl(el) {
+  if (!el.tagName) return;
+  const tag = el.tagName;
+  const isMedia = tag === 'IMG' || tag === 'VIDEO' || tag === 'AUDIO' || tag === 'SOURCE';
+  const currentSrc = isMedia ? (el.getAttribute('src') || '') : '';
+  const lastSrc = processedEls.get(el) || '';
+  if (lastSrc === currentSrc && processedEls.has(el)) return;
+  processedEls.set(el, currentSrc);
+  if (tag === 'IMG' || tag === 'VIDEO' || tag === 'AUDIO' || tag === 'SOURCE') {
+    const src = el.getAttribute('src');
+    if (src && !/^(data:|blob:)/i.test(src) && !el.getAttribute('data-real-src')) el.src = src;
+    
+    const lazySrc = el.getAttribute('data-src') || el.getAttribute('data-lazy') || el.getAttribute('data-original') || el.getAttribute('data-lazy-src');
+    if (lazySrc && !/^(data:|blob:)/i.test(lazySrc) && !el.getAttribute('data-real-src')) {
+      el.src = lazySrc;
+      el.removeAttribute('data-src');
+      el.removeAttribute('data-lazy');
+      el.removeAttribute('data-original');
+      el.removeAttribute('data-lazy-src');
+    }
+    const srcset = el.getAttribute('srcset') || el.getAttribute('data-srcset');
+    if (srcset && !/blob:/.test(srcset)) {
+      el.srcset = srcset;
+      if (el.getAttribute('data-srcset')) el.removeAttribute('data-srcset');
+    }
+    if (tag === 'VIDEO') {
+      const poster = el.getAttribute('poster');
+      if (poster && !/^(data:|blob:)/i.test(poster) && !el.getAttribute('data-real-poster')) el.poster = poster;
+    }
+  }
+  // Defuse anchor hrefs: store real URL in data-gust-href, set href to javascript:void(0)
+  // so the browser can NEVER navigate the iframe natively via a link click.
+  if (tag === 'A') {
+    const href = el.getAttribute('href');
+    if (href && !/^(javascript:|#|data:|blob:|mailto:|tel:)/i.test(href)) {
+      try {
+        const abs = resolve(href);
+        el.setAttribute('data-gust-href', abs);
+        el.setAttribute('href', 'javascript:void(0)');
+      } catch {}
+    }
+    const tgt = (el.getAttribute('target') || '').toLowerCase();
+    if (tgt && tgt !== '_self') el.setAttribute('target', '_self');
+  }
+  if (el.getAttribute('loading') === 'lazy') el.setAttribute('loading', 'eager');
+  const style = el.getAttribute('style');
+  if (style && style.includes('url(') && !/blob:/.test(style)) rewriteCss(style, BASE).then(r => el.setAttribute('style', r)).catch(() => {});
+}
+const observer = new MutationObserver(muts => {
+  for (const mut of muts) {
+    if (mut.type === 'childList') {
+      for (const node of mut.addedNodes) {
+        if (node.nodeType !== 1) continue;
+        processEl(node);
+        node.querySelectorAll?.('*').forEach(processEl);
+      }
+    }
+  }
+});
+observer.observe(document, { childList: true, subtree: true });
+
+// Pre-defuse all existing anchors on initial load.
+// Store real URL in data-gust-href, set href=javascript:void(0) so the
+// browser can never navigate the iframe natively from a link click.
+document.querySelectorAll('a[href], area[href]').forEach(a => {
+  const href = a.getAttribute('href');
+  if (href && !/^(javascript:|#|data:|blob:|mailto:|tel:)/i.test(href)) {
+    try {
+      const abs = resolve(href);
+      a.setAttribute('data-gust-href', abs);
+      a.setAttribute('href', 'javascript:void(0)');
+    } catch {}
+  }
+  const tgt = (a.getAttribute('target') || '').toLowerCase();
+  if (tgt && tgt !== '_self') a.setAttribute('target', '_self');
+});
+document.querySelectorAll('*').forEach(processEl);
+
+const fakeLoc = new URL(BASE);
+const locProxy = new Proxy({}, { get(_, p) { if (p === 'href') return fakeLoc.href; if (p === 'origin') return fakeLoc.origin; if (p === 'protocol') return fakeLoc.protocol; if (p === 'host') return fakeLoc.host; if (p === 'hostname') return fakeLoc.hostname; if (p === 'port') return fakeLoc.port; if (p === 'pathname') return fakeLoc.pathname; if (p === 'search') return fakeLoc.search; if (p === 'hash') return fakeLoc.hash; if (p === 'assign' || p === 'replace') return u => { try { const _r=resolve(u); const du=new URL(_r); const bu=new URL(BASE); if(du.origin===bu.origin&&du.pathname===bu.pathname&&du.search===bu.search) return; parent.postMessage({t:'n',u:_r},'*'); } catch { parent.postMessage({t:'n',u:resolve(u)},'*'); } }; if (p === 'reload') return () => parent.postMessage({ t: 'rl' }, '*'); if (p === 'toString' || p === Symbol.toPrimitive) return () => fakeLoc.href; if (p === 'ancestorOrigins') return { length: 0 }; }, set(_, p, v) { if (p === 'href') { if (!v || /^about:/i.test(v) || /^javascript:/i.test(v)) return true; try { const _r=resolve(v); const du=new URL(_r); const bu=new URL(BASE); if(du.origin===bu.origin&&du.pathname===bu.pathname&&du.search===bu.search) return true; parent.postMessage({t:'n',u:_r},'*'); return true; } catch {} parent.postMessage({ t: 'n', u: resolve(v) }, '*'); return true; } if (p === 'hash') { fakeLoc.hash = v; window.dispatchEvent(new HashChangeEvent('hashchange')); return true; } if (p === 'search') { parent.postMessage({ t: 'n', u: fakeLoc.origin + fakeLoc.pathname + v + fakeLoc.hash }, '*'); return true; } return true; } });
+try { Object.defineProperty(window, 'location', { value: locProxy }); } catch {}
+// Fix 3a: Override document.location — this IS configurable on all major browsers.
+try { Object.defineProperty(document, 'location', { get: () => locProxy, set(v) { if (v && typeof v === 'string') parent.postMessage({ t: 'n', u: resolve(v) }, '*'); }, configurable: true }); } catch {}
+try {
+  const locObj = window.location;
+  const locProto = Object.getPrototypeOf(locObj);
+  const setHref = v => { if (!v || /^about:/i.test(v) || /^javascript:/i.test(v)) return; parent.postMessage({ t: 'n', u: resolve(v) }, '*'); };
+  const setHash = v => { fakeLoc.hash = v; window.dispatchEvent(new HashChangeEvent('hashchange')); };
+  const setSearch = v => { parent.postMessage({ t: 'n', u: fakeLoc.origin + fakeLoc.pathname + v + fakeLoc.hash }, '*'); };
+  const defineLoc = (target, prop, get, set) => { try { Object.defineProperty(target, prop, { get, set, configurable: true }); } catch {} };
+  ['href','origin','protocol','host','hostname','port','pathname','search','hash'].forEach(p => {
+    const get = () => fakeLoc[p];
+    const set = p === 'href' ? setHref : p === 'hash' ? setHash : p === 'search' ? setSearch : () => {};
+    defineLoc(locObj, p, get, set);
+    defineLoc(locProto, p, get, set);
+  });
+  defineLoc(locObj, 'assign', () => u => setHref(u), null);
+  defineLoc(locProto, 'assign', () => u => setHref(u), null);
+  defineLoc(locObj, 'replace', () => u => setHref(u), null);
+  defineLoc(locProto, 'replace', () => u => setHref(u), null);
+  defineLoc(locObj, 'reload', () => () => parent.postMessage({ t: 'rl' }, '*'), null);
+  defineLoc(locProto, 'reload', () => () => parent.postMessage({ t: 'rl' }, '*'), null);
+  try { Object.defineProperty(locProto, 'toString', { value: () => fakeLoc.href, configurable: true }); } catch {}
+  try { Object.defineProperty(locObj, 'toString', { value: () => fakeLoc.href, configurable: true }); } catch {}
+} catch {}
+// Fix 3b: Patch Location.prototype.assign and Location.prototype.replace directly.
+// These are the methods called when site JS does: location.assign(url) or location.replace(url).
+// Because window.location itself may be non-configurable in some browser contexts, patching
+// the prototype methods is the most reliable interception layer without an AST rewriter.
+try {
+  Object.defineProperty(Location.prototype, 'assign', {
+    value: function(url) { parent.postMessage({ t: 'n', u: resolve(String(url)) }, '*'); },
+    writable: true, configurable: true
+  });
+} catch {}
+try {
+  Object.defineProperty(Location.prototype, 'replace', {
+    value: function(url) { parent.postMessage({ t: 'n', u: resolve(String(url)) }, '*'); },
+    writable: true, configurable: true
+  });
+} catch {}
+try { Object.defineProperty(document, 'URL', { get: () => BASE }); } catch {}
+try { Object.defineProperty(document, 'documentURI', { get: () => BASE }); } catch {}
+try { Object.defineProperty(document, 'baseURI', { get: () => BASE }); } catch {}
+try { Object.defineProperty(document, 'domain', { value: fakeLoc.hostname, writable: true }); } catch {}
+try { Object.defineProperty(document, 'referrer', { get: () => '' }); } catch {}
+try { Object.defineProperty(window, 'origin', { get: () => ORIGIN }); } catch {}
+try { Object.defineProperty(Location.prototype, 'origin', { get: () => ORIGIN, configurable: true }); } catch {}
+
+if (!crypto.randomUUID) {
+  crypto.randomUUID = function() {
+    const buf = new Uint8Array(16);
+    crypto.getRandomValues(buf);
+    buf[6] = (buf[6] & 0x0f) | 0x40;
+    buf[8] = (buf[8] & 0x3f) | 0x80;
+    const hex = [...buf].map(b => b.toString(16).padStart(2, '0'));
+    return hex.slice(0, 4).join('') + "-" +
+      hex.slice(4, 6).join('') + "-" +
+      hex.slice(6, 8).join('') + "-" +
+      hex.slice(8, 10).join('') + "-" +
+      hex.slice(10, 16).join('');
+  };
+}
+
+window.__gustImportScripts = function(...urls) {
+  
+  urls.forEach(u => {
+    try {
+      const absUrl = resolve(u);
+      const xhr = new XMLHttpRequest();
+      xhr.open('GET', absUrl, false); 
+      xhr.send();
+      if (xhr.status >= 200 && xhr.status < 400) {
+        (0, eval)(xhr.responseText);
+      }
+    } catch(e) {}
+  });
+};
+
+
+document.addEventListener('mousedown', e => {
+  const a = e.target?.closest?.('a, area');
+  if (!a) return;
+  // Read the real URL from data-gust-href (set by defuse sweep) or fall back to href.
+  const href = a.getAttribute('data-gust-href') || a.getAttribute('href');
+  if (!href || /^(javascript:|#|data:|blob:|mailto:|tel:)/i.test(href)) return;
+  try {
+    const abs = resolve(href);
+    a._gustHref = abs;
+    parent.postMessage({ t: 'hint', u: abs }, '*');
+  } catch {}
+}, true);
+document.addEventListener('click', e => {
+  const a = e.target?.closest?.('a, area');
+  if (!a) return;
+  const href = a._gustHref || a.getAttribute('data-gust-href') || a.getAttribute('href');
+  if (!href) return;
+  if (href.startsWith('#')) {
+    const id = href.slice(1);
+    const el = document.getElementById(id);
+    if (el) el.scrollIntoView();
+    fakeLoc.hash = href;
+    window.dispatchEvent(new HashChangeEvent('hashchange'));
+    e.preventDefault();
+    return;
+  }
+  // Skip non-navigatable schemes (javascript:void(0) with no data-gust-href).
+  if (/^(javascript:|mailto:|tel:|data:|blob:)/i.test(href)) { return; }
+  e.preventDefault();
+  e.stopPropagation();
+  e.stopImmediatePropagation();
+  parent.postMessage({ t: 'n', u: resolve(href) }, '*');
+}, true);
+document.addEventListener('auxclick', e => { if (e.button !== 1) return; const a = e.target?.closest?.('a, area'); if (!a) return; const href = a._gustHref || a.getAttribute('data-gust-href') || a.getAttribute('href'); if (!href || /^(javascript:|#)/i.test(href)) return; e.preventDefault(); e.stopPropagation(); parent.postMessage({ t: 'n', u: resolve(href) }, '*'); }, true);
+document.addEventListener('submit', e => { const form = e.target; if (!form || form.tagName !== 'FORM') return; e.preventDefault(); e.stopPropagation(); e.stopImmediatePropagation(); const action = resolve(form.action || BASE); const method = (form.method || 'GET').toUpperCase(); const fd = new FormData(form); if (method === 'GET') { parent.postMessage({ t: 'n', u: action.split('?')[0] + '?' + new URLSearchParams(fd).toString(), form: 1 }, '*'); } else { parent.postMessage({ t: 'n', u: action, m: 'POST', b: new URLSearchParams(fd).toString(), form: 1 }, '*'); } }, true);
+
+const _open = window.open;
+window.open = function(url, target, features) { if (!url || url === 'about:blank') return null; const resolved = resolve(url); parent.postMessage({ t: 'n', u: resolved }, '*'); return { closed: false, close: () => {}, focus: () => {}, blur: () => {}, postMessage: () => {}, location: { href: resolved }, document: { write: () => {}, close: () => {} } }; };
+
+// Intercept the Navigation API (window.navigation) — used by Chromium-based SPAs
+// like Brave Search to navigate without touching location or firing a click event.
+// Without this, result-link clicks bypass every other intercept and navigate natively.
+try {
+  if (window.navigation) {
+    window.navigation.addEventListener('navigate', e => {
+      const dest = e.destination?.url;
+      if (!dest || /^(about:|blob:|javascript:)/i.test(dest)) return;
+      // Only intercept real forward navigations (link clicks, programmatic navigate()).
+      // 'replace' and 'reload' are used by SPAs for state management — intercepting
+      // them causes pages like YouTube to reload mid-initialization.
+      const navType = e.navigationType;
+      if (navType === 'replace' || navType === 'reload' || navType === 'traverse') return;
+      // Don't intercept navigations to the exact same URL (minus hash) — these
+      // are SPA hash/state updates, not real navigations. We still intercept if
+      // origin+path are the same but the search string changed (e.g. new search query).
+      try {
+        const du = new URL(dest); const bu = new URL(BASE);
+        if (du.origin === bu.origin && du.pathname === bu.pathname && du.search === bu.search) return;
+      } catch { if (dest === BASE) return; }
+      // Send the navigation message FIRST so the parent can route it even
+      // if the interception attempt below throws or fails.
+      // nav:1 = real forward navigation (push), bypasses parent's same-page
+      // guard. Without this flag, a preceding pushState 'uc' message would
+      // have already updated pageUrl, making the guard treat this as no-op.
+      parent.postMessage({ t: 'n', u: resolve(dest), nav: 1 }, '*');
+      // Then try to prevent the native navigation.
+      try {
+        if (e.canIntercept) {
+          e.intercept({ handler: () => Promise.resolve() });
+        } else {
+          try { e.preventDefault(); } catch(_) {}
+        }
+      } catch(_interceptErr) {
+        try { e.preventDefault(); } catch(_) {}
+      }
+    });
+  }
+} catch (_navApiErr) {}
+
+// Intercept anchor .target so links never escape the proxy iframe
+const anchorTargetDesc = Object.getOwnPropertyDescriptor(HTMLAnchorElement.prototype, 'target');
+if (anchorTargetDesc) { Object.defineProperty(HTMLAnchorElement.prototype, 'target', { get() { return '_self'; }, set(v) {}, configurable: true }); }
+const formTargetDesc = Object.getOwnPropertyDescriptor(HTMLFormElement.prototype, 'target');
+if (formTargetDesc) { Object.defineProperty(HTMLFormElement.prototype, 'target', { get() { return ''; }, set(v) {}, configurable: true }); }
+
+// Intercept anchor .href property assignments (el.href = '...').
+// MutationObserver only fires for setAttribute() — direct property sets bypass it.
+// This catches dynamically-built result links (Brave, Google, etc.) that set
+// href as a JS property rather than an HTML attribute.
+const anchorHrefDesc = Object.getOwnPropertyDescriptor(HTMLAnchorElement.prototype, 'href');
+if (anchorHrefDesc && anchorHrefDesc.set) {
+  Object.defineProperty(HTMLAnchorElement.prototype, 'href', {
+    // Return data-gust-href (the real URL) if present, so site JS that reads
+    // el.href after setting it still gets the correct absolute URL.
+    get() { return this.getAttribute('data-gust-href') || anchorHrefDesc.get.call(this); },
+    set(v) {
+      // Let the browser normalise the value first (resolves relative paths)
+      anchorHrefDesc.set.call(this, v);
+      const normalised = anchorHrefDesc.get.call(this);
+      if (normalised && !/^(javascript:|#|data:|blob:|mailto:|tel:)/i.test(normalised)) {
+        try {
+          const abs = resolve(normalised);
+          this.setAttribute('data-gust-href', abs);
+          anchorHrefDesc.set.call(this, 'javascript:void(0)');
+        } catch {}
+      }
+    },
+    configurable: true
+  });
+}
+
+// Deferred sweep: defuse anchor hrefs on JS-rendered/SPA pages.
+const _rewriteAnchors = () => {
+  document.querySelectorAll('a, area').forEach(a => {
+    const href = a.getAttribute('href');
+    if (href && !/^(javascript:|#|data:|blob:|mailto:|tel:)/i.test(href)) {
+      try {
+        const abs = resolve(href);
+        a.setAttribute('data-gust-href', abs);
+        a.setAttribute('href', 'javascript:void(0)');
+      } catch {}
+    }
+    // Also pick up anchors that only have data-gust-href but lost href somehow
+    const tgt = (a.getAttribute('target') || '').toLowerCase();
+    if (tgt && tgt !== '_self') a.setAttribute('target', '_self');
+  });
+};
+setTimeout(_rewriteAnchors, 300);
+setTimeout(_rewriteAnchors, 1500);
+
+// Fix 2: Intercept programmatic form.submit() calls (not caught by the 'submit' event listener).
+// We override the prototype method so that any site JS calling form.submit() is routed
+// through the proxy instead of causing a native top-level / iframe navigation.
+const _nativeFormSubmit = HTMLFormElement.prototype.submit;
+HTMLFormElement.prototype.submit = function() {
+  try {
+    const form = this;
+    const action = resolve(form.getAttribute('action') || BASE);
+    const method = (form.getAttribute('method') || 'GET').toUpperCase();
+    const fd = new FormData(form);
+    if (method === 'POST') {
+      parent.postMessage({ t: 'n', u: action, m: 'POST', b: new URLSearchParams(fd).toString() }, '*');
+    } else {
+      const qs = new URLSearchParams(fd).toString();
+      parent.postMessage({ t: 'n', u: action.split('?')[0] + (qs ? '?' + qs : '') }, '*');
+    }
+  } catch(e) {
+    // Fallback: if serialisation fails for any reason, attempt native submit
+    // (will likely be blocked by XFO/CSP, but better than a silent failure)
+    try { _nativeFormSubmit.call(this); } catch {}
+  }
+};
+
+const origPush = history.pushState;
+const origReplace = history.replaceState;
+history.pushState = function(s, t, u) { if (u) { try { Object.assign(fakeLoc, new URL(resolve(u))); } catch {} parent.postMessage({ t: 'uc', u: fakeLoc.href }, '*'); } return origPush.call(this, s, t, null); };
+history.replaceState = function(s, t, u) { if (u) { try { Object.assign(fakeLoc, new URL(resolve(u))); } catch {} parent.postMessage({ t: 'uc', u: fakeLoc.href }, '*'); } return origReplace.call(this, s, t, null); };
+
+const OrigWorker = window.Worker;
+if (OrigWorker) { window.Worker = function(url, opts) { const absUrl = resolve(url); const w = { onmessage: null, onerror: null, postMessage: () => {}, terminate: () => {}, addEventListener: () => {}, removeEventListener: () => {} }; const p = /^(data:|blob:)/i.test(absUrl) ? _fetch.call(window, absUrl).then(r => r.arrayBuffer()).then(buf => { const arr = new Uint8Array(buf); let bin = ""; for(let i=0; i<arr.length; i++) bin+=String.fromCharCode(arr[i]); return { d: btoa(bin) }; }) : req(absUrl); p.then(r => { const bin = atob(r.d || ''); const arr = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i); const blob = new Blob([arr], { type: 'application/javascript' }); const real = new OrigWorker(URL.createObjectURL(blob), opts); w.postMessage = m => real.postMessage(m); w.terminate = () => real.terminate(); w.addEventListener = (t, fn) => real.addEventListener(t, fn); w.removeEventListener = (t, fn) => real.removeEventListener(t, fn); real.onmessage = e => w.onmessage?.(e); real.onerror = e => w.onerror?.(e); }).catch(e => w.onerror?.(new ErrorEvent('error', { message: e.message }))); return w; }; }
+
+// SharedWorker shim — proxy the script through Gust then run as a plain Worker
+// (SharedWorkers can't share state across tabs in a single-iframe proxy, but at least
+// the script loads and executes instead of failing with a cross-origin error)
+const OrigSharedWorker = window.SharedWorker;
+if (OrigSharedWorker) {
+  window.SharedWorker = function(url, opts) {
+    const absUrl = resolve(url);
+    // Build a minimal MessagePort-like interface backed by a regular Worker
+    const portHandlers = { message: [], messageerror: [] };
+    const sw = {
+      port: {
+        onmessage: null,
+        onmessageerror: null,
+        postMessage: () => {},
+        start: () => {},
+        close: () => {},
+        addEventListener(t, fn) { (portHandlers[t] = portHandlers[t] || []).push(fn); },
+        removeEventListener(t, fn) { portHandlers[t] = (portHandlers[t]||[]).filter(f=>f!==fn); },
+      },
+      onerror: null,
+      addEventListener: () => {},
+      removeEventListener: () => {},
+    };
+    const p = /^(data:|blob:)/i.test(absUrl)
+      ? _fetch.call(window, absUrl).then(r => r.arrayBuffer()).then(buf => {
+          const arr = new Uint8Array(buf); let bin = '';
+          for (let i = 0; i < arr.length; i++) bin += String.fromCharCode(arr[i]);
+          return { d: btoa(bin) };
+        })
+      : req(absUrl);
+    p.then(r => {
+      const bin = atob(r.d || '');
+      const arr = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
+      const blob = new Blob([arr], { type: 'application/javascript' });
+      const real = new OrigWorker(URL.createObjectURL(blob), { name: (typeof opts === 'string' ? opts : opts?.name) || '' });
+      sw.port.postMessage = m => real.postMessage(m);
+      sw.port.close = () => real.terminate();
+      real.onmessage = e => {
+        if (sw.port.onmessage) sw.port.onmessage(e);
+        (portHandlers.message || []).forEach(fn => fn(e));
+      };
+      real.onerror = e => { if (sw.onerror) sw.onerror(e); };
+    }).catch(e => { if (sw.onerror) sw.onerror(new ErrorEvent('error', { message: e.message })); });
+    return sw;
+  };
