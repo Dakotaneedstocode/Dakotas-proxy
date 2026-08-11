@@ -1,4 +1,14 @@
-// Dakota's Basement — Scramjet v2 service worker
+/// <reference path="../lib/index.d.ts" />
+
+// Scramjet v2 service worker.
+// The runtime and WASM files must be available under /scram/.
+//
+// Required files:
+//   /scram/scramjet.all.js
+//   /scram/scramjet.sync.js
+//   /scram/scramjet.wasm.wasm
+//
+// The transport itself is configured from the parent page through BareMux.
 
 if (navigator.userAgent.includes("Firefox")) {
     try {
@@ -9,12 +19,9 @@ if (navigator.userAgent.includes("Firefox")) {
     } catch {}
 }
 
-// Scramjet's service-worker bundle.
-// This file must exist at /scramjet/scramjet.all.js.
-importScripts("/scramjet/scramjet.all.js");
+importScripts("/scram/scramjet.all.js");
 
 const { ScramjetServiceWorker } = $scramjetLoadWorker();
-
 const scramjet = new ScramjetServiceWorker();
 
 async function handleRequest(event) {
