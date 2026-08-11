@@ -1,9 +1,4 @@
-// sw.js
-//
-// Scramjet v2 service worker.
-//
-// Make sure the Scramjet runtime files referenced below actually exist at
-// these paths on your server.
+// Dakota's Basement — Scramjet v2 service worker
 
 if (navigator.userAgent.includes("Firefox")) {
     try {
@@ -14,7 +9,8 @@ if (navigator.userAgent.includes("Firefox")) {
     } catch {}
 }
 
-// Load the Scramjet v2 worker runtime.
+// Scramjet's service-worker bundle.
+// This file must exist at /scramjet/scramjet.all.js.
 importScripts("/scramjet/scramjet.all.js");
 
 const { ScramjetServiceWorker } = $scramjetLoadWorker();
@@ -40,9 +36,5 @@ self.addEventListener("install", () => {
 });
 
 self.addEventListener("activate", (event) => {
-    event.waitUntil(
-        (async () => {
-            await self.clients.claim();
-        })()
-    );
+    event.waitUntil(self.clients.claim());
 });
